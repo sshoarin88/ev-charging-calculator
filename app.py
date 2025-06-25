@@ -1,7 +1,6 @@
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta, time
-import pytz
 
 st.set_page_config(page_title="The Royal EV Charging Calculator")
 st.title("The Royal EV Charging Calculator")
@@ -15,6 +14,7 @@ st.write(
 uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
+    df.columns = df.columns.str.strip()  # Remove any leading/trailing spaces
 
     # Parse start time and calculate end time
     df['Session Start'] = pd.to_datetime(df['Date (console local time)'])
@@ -37,14 +37,13 @@ if uploaded_file is not None:
     # Processing per QR Code Name
     results = []
     for name, group in df.groupby('QR Code Name'):
-        total_power = group['Power Usage'].sum()
+        total_power = group['Power Usage (kWh)'].sum()
         power_cost = total_power * 0.22
 
         total_idle_cost = 0
         total_idle_hours = 0
         for idx, row in group.iterrows():
-            # Calculate idle hours (round down)
-            idle_seconds = row['Idle Time']
+            idle_seconds = row['Idle Time (s)']
             idle_hours = int(idle_seconds // 3600)
 
             if idle_hours == 0:
@@ -56,6 +55,7 @@ if uploaded_file is not None:
 
             paid_idle_hours = 0
             current = idle_start
+
             for h in range(idle_hours):
                 hour_start = current + timedelta(hours=h)
                 # Only charge if NOT between 12am and 7am (Calgary time)
