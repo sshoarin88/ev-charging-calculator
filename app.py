@@ -49,30 +49,19 @@ if uploaded_file is not None:
             if idle_seconds == 0:
                 continue
 
-            # Only charge idle if charge ended before midnight (00:00)
-            if charge_end.time() >= time(0, 0):
-                # If charge ends at or after midnight, idle is always free
-                if charge_end.time() < time(0, 0) or charge_end.time() >= time(0, 0):
-                    continue
+            # Only charge idle if charge ended before midnight (same calendar day as session started)
+            if charge_end.date() != row['Session Start'].date():
+                continue  # Charge ended after midnight, no idle charge
 
-            if charge_end.time() >= time(0, 0):  # Explicit check, redundant but for clarity
-                if charge_end.time() >= time(0, 0):
-                    continue
-
-            # If charge ends before midnight, see if any idle happens after 7 AM
+            # Billable idle time only after 7 AM
             idle_start = charge_end
             idle_end = idle_start + timedelta(seconds=idle_seconds)
-
-            # Billable idle time only counts hours after 7 AM
             billable_start = max(idle_start, idle_start.replace(hour=7, minute=0, second=0, microsecond=0))
             if idle_end <= billable_start:
-                continue  # No billable idle time
+                continue  # All idle before 7 AM
 
             billable_seconds = (idle_end - billable_start).total_seconds()
-            if billable_seconds < 3600:
-                billable_hours = 0
-            else:
-                billable_hours = int(billable_seconds // 3600)
+            billable_hours = int(billable_seconds // 3600) if billable_seconds >= 3600 else 0
 
             total_idle_hours += billable_hours
             total_idle_cost += billable_hours * 5.0
