@@ -16,11 +16,13 @@ if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
     df.columns = df.columns.str.strip()  # Remove any leading/trailing spaces
 
-    # Parse start time and calculate end time
+    # Parse start time and calculate charge end and session end
     df['Session Start'] = pd.to_datetime(df['Date (console local time)'])
-    df['Session End'] = df['Session Start'] + pd.to_timedelta(df['Total Time (s)'], unit='s')
+    df['Charge End'] = df['Session Start'] + pd.to_timedelta(df['Charge Time (s)'], unit='s')
+    df['Idle Time (s)'] = df['Idle Time (s)'].fillna(0)
+    df['Idle End'] = df['Charge End'] + pd.to_timedelta(df['Idle Time (s)'], unit='s')
 
-    # Set up date picker using start dates
+    # Date picker for session start
     min_date = df['Session Start'].dt.date.min()
     max_date = df['Session Start'].dt.date.max()
     start_date, end_date = st.date_input(
@@ -34,7 +36,6 @@ if uploaded_file is not None:
     mask = (df['Session Start'].dt.date >= start_date) & (df['Session Start'].dt.date <= end_date)
     df = df[mask]
 
-    # Processing per QR Code Name
     results = []
     for name, group in df.groupby('QR Code Name'):
         total_power = group['Power Usage (kWh)'].sum()
@@ -43,27 +44,38 @@ if uploaded_file is not None:
         total_idle_cost = 0
         total_idle_hours = 0
         for idx, row in group.iterrows():
+            charge_end = row['Charge End']
             idle_seconds = row['Idle Time (s)']
-            idle_hours = int(idle_seconds // 3600)
-
-            if idle_hours == 0:
+            if idle_seconds == 0:
                 continue
 
-            session_end = row['Session End']
-            idle_start = session_end
+            # Only charge idle if charge ended before midnight (00:00)
+            if charge_end.time() >= time(0, 0):
+                # If charge ends at or after midnight, idle is always free
+                if charge_end.time() < time(0, 0) or charge_end.time() >= time(0, 0):
+                    continue
+
+            if charge_end.time() >= time(0, 0):  # Explicit check, redundant but for clarity
+                if charge_end.time() >= time(0, 0):
+                    continue
+
+            # If charge ends before midnight, see if any idle happens after 7 AM
+            idle_start = charge_end
             idle_end = idle_start + timedelta(seconds=idle_seconds)
 
-            paid_idle_hours = 0
-            current = idle_start
+            # Billable idle time only counts hours after 7 AM
+            billable_start = max(idle_start, idle_start.replace(hour=7, minute=0, second=0, microsecond=0))
+            if idle_end <= billable_start:
+                continue  # No billable idle time
 
-            for h in range(idle_hours):
-                hour_start = current + timedelta(hours=h)
-                # Only charge if NOT between 12am and 7am (Calgary time)
-                if not (time(0, 0) <= hour_start.time() < time(7, 0)):
-                    paid_idle_hours += 1
+            billable_seconds = (idle_end - billable_start).total_seconds()
+            if billable_seconds < 3600:
+                billable_hours = 0
+            else:
+                billable_hours = int(billable_seconds // 3600)
 
-            total_idle_hours += paid_idle_hours
-            total_idle_cost += paid_idle_hours * 5.0
+            total_idle_hours += billable_hours
+            total_idle_cost += billable_hours * 5.0
 
         total_amount = power_cost + total_idle_cost
         results.append({
