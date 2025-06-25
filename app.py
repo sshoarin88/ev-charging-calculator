@@ -11,16 +11,32 @@ st.write(
     """
 )
 
+def calculate_billable_idle_hours(session_start, charge_time_s, idle_time_s):
+    charge_end = session_start + timedelta(seconds=charge_time_s)
+    idle_start = charge_end
+    idle_end = idle_start + timedelta(seconds=idle_time_s)
+
+    # 7 AM reference point
+    seven_am = idle_start.replace(hour=7, minute=0, second=0, microsecond=0)
+    # If idle_start is before 7 AM, but idle_end passes 7 AM (even if on next day)
+    if idle_start.time() < time(7, 0):
+        seven_am = (idle_start + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
+
+    billable_start = max(idle_start, seven_am)
+    if idle_end <= billable_start:
+        return 0
+
+    billable_seconds = (idle_end - billable_start).total_seconds()
+    billable_hours = int(billable_seconds // 3600)
+    return billable_hours
+
 uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
     df.columns = df.columns.str.strip()  # Remove any leading/trailing spaces
 
-    # Parse start time and calculate charge end and session end
+    # Parse start time
     df['Session Start'] = pd.to_datetime(df['Date (console local time)'])
-    df['Charge End'] = df['Session Start'] + pd.to_timedelta(df['Charge Time (s)'], unit='s')
-    df['Idle Time (s)'] = df['Idle Time (s)'].fillna(0)
-    df['Idle End'] = df['Charge End'] + pd.to_timedelta(df['Idle Time (s)'], unit='s')
 
     # Date picker for session start
     min_date = df['Session Start'].dt.date.min()
@@ -44,25 +60,12 @@ if uploaded_file is not None:
         total_idle_cost = 0
         total_idle_hours = 0
         for idx, row in group.iterrows():
-            charge_end = row['Charge End']
-            idle_seconds = row['Idle Time (s)']
-            if idle_seconds == 0:
+            session_start = row['Session Start']
+            charge_time_s = row['Charge Time (s)']
+            idle_time_s = row['Idle Time (s)']
+            if idle_time_s == 0:
                 continue
-
-            # Only charge idle if charge ended before midnight (same calendar day as session started)
-            if charge_end.date() != row['Session Start'].date():
-                continue  # Charge ended after midnight, no idle charge
-
-            # Billable idle time only after 7 AM
-            idle_start = charge_end
-            idle_end = idle_start + timedelta(seconds=idle_seconds)
-            billable_start = max(idle_start, idle_start.replace(hour=7, minute=0, second=0, microsecond=0))
-            if idle_end <= billable_start:
-                continue  # All idle before 7 AM
-
-            billable_seconds = (idle_end - billable_start).total_seconds()
-            billable_hours = int(billable_seconds // 3600) if billable_seconds >= 3600 else 0
-
+            billable_hours = calculate_billable_idle_hours(session_start, charge_time_s, idle_time_s)
             total_idle_hours += billable_hours
             total_idle_cost += billable_hours * 5.0
 
