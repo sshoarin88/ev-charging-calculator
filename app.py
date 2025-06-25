@@ -1,6 +1,6 @@
 import pandas as pd
 import streamlit as st
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="The Royal EV Charging Calculator")
 st.title("The Royal EV Charging Calculator")
@@ -8,51 +8,67 @@ st.title("The Royal EV Charging Calculator")
 st.write(
     """
     Upload your CSV charging history, select a date range, and view costs per QR Code Name.
-    Idle time fees are only applied if a vehicle remains idle past midnight. The fee is calculated for each full hour of idle time between the end of the charge and midnight.
+    Idle time fees are calculated based on specific time windows.
     """
 )
 
-def billable_idle_hours_before_midnight(charge_end, idle_time_s):
+def calculate_billable_idle_hours(row):
     """
-    Calculates billable idle hours based on specific rules.
-
-    A session is only billable for idle time if the idle period crosses midnight.
-    The billable portion is the duration from the end of the charge until midnight.
-    This duration is rounded down to the nearest whole hour.
+    Calculates the billable idle hours based on a complex set of rules.
 
     Args:
-        charge_end (datetime): The timestamp when the vehicle finished charging.
-        idle_time_s (int): The total idle time in seconds for the session.
+        row (pd.Series): A row from the DataFrame containing charging session data.
+                         It must include 'Session Start', 'Charge Time (s)', and 'Idle Time (s)'.
 
     Returns:
-        int: The number of billable, whole hours of idle time.
+        int: The total number of billable idle hours, rounded down.
     """
-    # If there's no idle time, there can be no billable hours.
-    if idle_time_s <= 0:
-        return 0
-
-    idle_start = charge_end
-    actual_idle_end = idle_start + timedelta(seconds=idle_time_s)
-
-    # Determine the midnight that immediately follows the charge completion time.
-    # This is effectively 00:00:00 of the next calendar day.
-    midnight = (idle_start + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # The core business rule: idle time is only billable if the vehicle is still
-    # idle when midnight strikes. This means the idle period must start before
-    # midnight and end after it.
-    if idle_start < midnight and actual_idle_end > midnight:
-        # If the condition is met, the billable duration is the time from
-        # when idling began (charge_end) up until midnight.
-        billable_seconds = (midnight - idle_start).total_seconds()
-        
-        # We only charge for full hours, so we round down using integer division.
-        billable_hours = int(billable_seconds // 3600)
-        
-        return billable_hours
+    # Extract start time and durations from the row
+    session_start = row['Session Start']
+    charge_time_seconds = row['Charge Time (s)']
+    idle_time_seconds = row['Idle Time (s)']
     
-    # If the idle period does not cross the midnight threshold, it is not billable.
-    return 0
+    # Calculate the end of charging and the end of the total session (charge + idle)
+    charge_end = session_start + timedelta(seconds=charge_time_seconds)
+    session_end = charge_end + timedelta(seconds=idle_time_seconds)
+
+    # Define key time points for the calculation logic based on the session start day
+    midnight_start_of_day = session_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    hour_24_from_start_of_day = midnight_start_of_day + timedelta(hours=24) # Midnight at the end of the start day
+    hour_31_from_start_of_day = midnight_start_of_day + timedelta(hours=31) # 7 AM the next day
+    
+    billable_hours = 0
+    
+    # --- Scenario 1 & 2: Session ends before the first midnight (24h mark) ---
+    # If the entire session (charging + idling) is over before the first midnight,
+    # the idle time is simply the total idle duration in hours, rounded down.
+    if session_end <= hour_24_from_start_of_day:
+        billable_hours = int(idle_time_seconds // 3600)
+        return billable_hours
+
+    # --- Scenario 3 & 4: Session crosses the first midnight (24h mark) ---
+    # This handles cases where idling occurs both before and potentially after midnight.
+    if charge_end < hour_24_from_start_of_day:
+        # Calculate idle time that occurs before the first midnight.
+        # This is the time from when charging ends to midnight.
+        idle_before_midnight_seconds = (hour_24_from_start_of_day - charge_end).total_seconds()
+        billable_hours += int(max(0, idle_before_midnight_seconds) // 3600)
+
+    # --- Scenario 5: Session crosses the 31-hour mark ---
+    # This handles the rule where there is no charge for idling between 24h and 31h,
+    # but charges resume for any idling that occurs after the 31h mark.
+    if session_end > hour_31_from_start_of_day:
+        # The start of this billable idle period is the later of two times:
+        # 1. The 31-hour mark.
+        # 2. The actual time the car finished charging.
+        # This ensures we don't bill for charging time that happens after the 31h mark.
+        idle_after_31h_starts = max(charge_end, hour_31_from_start_of_day)
+        
+        # Calculate the duration of the billable idle time after the 31h mark.
+        idle_after_31h_seconds = (session_end - idle_after_31h_starts).total_seconds()
+        billable_hours += int(max(0, idle_after_31h_seconds) // 3600)
+        
+    return billable_hours
 
 # Allow user to upload a CSV file
 uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
@@ -66,21 +82,10 @@ if uploaded_file is not None:
     # --- Data Processing and Calculation ---
 
     # Convert date/time columns to datetime objects for calculations
-    # The 'errors='coerce'' argument will turn any unparseable dates into NaT (Not a Time)
     df['Session Start'] = pd.to_datetime(df['Date (console local time)'], errors='coerce')
-
-    # Drop any rows where the date could not be parsed
     df.dropna(subset=['Session Start'], inplace=True)
 
-    # Calculate the end of the charging period
-    df['Charge End'] = df.apply(
-        lambda row: row['Session Start'] + pd.to_timedelta(row['Charge Time (s)'], unit='s'),
-        axis=1
-    )
-
     # --- UI for Date Filtering ---
-
-    # Create a date picker for filtering sessions
     min_date = df['Session Start'].dt.date.min()
     max_date = df['Session Start'].dt.date.max()
 
@@ -92,14 +97,11 @@ if uploaded_file is not None:
         help="Select the start and end dates for the report."
     )
 
-    # Apply the date range filter to the DataFrame
     mask = (df['Session Start'].dt.date >= start_date) & (df['Session Start'].dt.date <= end_date)
     filtered_df = df[mask].copy()
 
     # --- Cost Calculation ---
-
     results = []
-    # Group the data by each unique QR Code Name to aggregate costs
     for name, group in filtered_df.groupby('QR Code Name'):
         total_power = group['Power Usage (kWh)'].sum()
         power_cost = total_power * 0.22  # Power cost at $0.22 per kWh
@@ -107,19 +109,15 @@ if uploaded_file is not None:
         total_idle_cost = 0
         total_idle_hours_billed = 0
         
-        # Iterate through each charging session for the user
         for idx, row in group.iterrows():
-            # Calculate billable hours using the corrected logic
-            billable_hours = billable_idle_hours_before_midnight(row['Charge End'], row['Idle Time (s)'])
+            # Use the new detailed calculation function for each session
+            billable_hours = calculate_billable_idle_hours(row)
             
-            # Add to the totals for this user
             total_idle_hours_billed += billable_hours
             total_idle_cost += billable_hours * 5.0  # Idle cost at $5.00 per hour
 
-        # Calculate the final total amount
         total_amount = power_cost + total_idle_cost
 
-        # Append the aggregated results for this user to our list
         results.append({
             "QR Code Name": name,
             "Total Power Usage (kWh)": round(total_power, 2),
@@ -130,12 +128,10 @@ if uploaded_file is not None:
         })
 
     # --- Display Results ---
-
     if results:
         results_df = pd.DataFrame(results)
         st.dataframe(results_df)
 
-        # Prepare the dataframe for CSV download
         csv_data = results_df.to_csv(index=False).encode('utf-8')
 
         st.download_button(
